@@ -27,3 +27,17 @@ and resets the layout (rewards can be farmed again within the horizon).
 ```bash
 python ex2_check.py
 ```
+
+## Documentation
+
+A formatted PDF summary of the Assignment 2 implementation is available at
+[`docs/Assignment2_Summary.pdf`](docs/Assignment2_Summary.pdf).
+
+It covers the assignment requirements, overall approach, initialization logic,
+the decision ladder, and compliance notes.
+
+To regenerate the PDF:
+```bash
+pip install reportlab
+python docs/generate_summary_pdf.py
+```
