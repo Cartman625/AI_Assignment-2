@@ -99,218 +99,173 @@ def build_story(styles):
     usable_width = PAGE_WIDTH - 2 * MARGIN
     story = []
 
-    # ------------------------------------------------------------------ #
-    # Title
-    # ------------------------------------------------------------------ #
     story.append(Paragraph(
-        "Summary: Assignment 2 — Stochastic Multi-Elevator Controller",
+        "Technical Summary: Assignment 2 Stochastic Elevator Controller",
         styles["DocTitle"],
     ))
     story.append(Paragraph(
-        "A breakdown of what the assignment demanded and how <b>ex2.py</b> satisfies it.",
+        "This document explains the implemented controller in <b>ex2.py</b> at code-level detail, "
+        "including state tracking, A* planning integration, stochastic recovery logic, and the focused "
+        "tuning pass for <b>e4_hard</b> + <b>rl_*</b> layouts.",
         styles["Body"],
     ))
     story.append(Spacer(1, 0.3 * cm))
 
-    # ------------------------------------------------------------------ #
-    # Section 1 — What the assignment asked for
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("1. What the assignment asked for", styles["H2"]))
+    story.append(Paragraph("1. Problem contract and objective", styles["H2"]))
     story.append(Paragraph(
-        "Based on the stub, engine (<i>ext_elev.py</i>), grader (<i>ex2_check.py</i>), "
-        "and README, the demands are:",
+        "The controller receives states of the form <b>(elevators_t, persons_t, total_remaining)</b> and must "
+        "emit one legal action per step: <b>MOVE{e,f}</b>, <b>ENTER{p,e}</b>, <b>EXIT{p,e}</b>, or <b>RESET</b>. "
+        "Actions are stochastic (move/enter/exit may fail), rewards are sampled per delivered passenger, and "
+        "delivering the final passenger in an episode grants goal_reward and resets the layout.",
         styles["Body"],
     ))
 
-    req_data = [
-        [Paragraph("<b>Requirement</b>", styles["TableCell"]),
-         Paragraph("<b>Source</b>", styles["TableCell"])],
-        [Paragraph(
-            "Implement <b>Controller.choose_next_action(state)</b> returning one legal action string per step",
-            styles["TableCell"]),
-         Paragraph("<i>ex2.py</i> stub", styles["TableCell"])],
-        [Paragraph(
-            "Return one of <b>MOVE{e,f}</b>, <b>ENTER{p,e}</b>, <b>EXIT{p,e}</b>, <b>RESET</b>",
-            styles["TableCell"]),
-         Paragraph("engine contract", styles["TableCell"])],
-        [Paragraph(
-            "State is <b>(elevators_t, persons_t, total_persons_remaining)</b>",
-            styles["TableCell"]),
-         Paragraph("engine", styles["TableCell"])],
-        [Paragraph(
-            "Interact <b>only</b> through <b>GameAPI</b> — touching the underlying Game = grade of zero",
-            styles["TableCell"]),
-         Paragraph("engine-access policy", styles["TableCell"])],
-        [Paragraph(
-            "Handle a <b>stochastic MDP</b>: elevator moves and person enter/exit can fail",
-            styles["TableCell"]),
-         Paragraph("<i>Game._apply_*</i>", styles["TableCell"])],
-        [Paragraph(
-            "Maximize reward across <b>33 problems</b> (11 layouts × easy/medium/hard) × 30 seeds, within a step horizon",
-            styles["TableCell"]),
-         Paragraph("<i>ex2_check.py</i>", styles["TableCell"])],
-        [Paragraph(
-            "Exploit that delivering the <b>last</b> person grants goal_reward and resets the layout (rewards can be re-farmed)",
-            styles["TableCell"]),
-         Paragraph("engine + README", styles["TableCell"])],
-        [Paragraph(
-            "Match/beat baselines: <b>random</b>, <b>sol1_h3/h5/h6</b>, <b>sol2</b>",
-            styles["TableCell"]),
-         Paragraph("<i>baseline/summary.md</i>", styles["TableCell"])],
+    contract_data = [
+        [Paragraph("<b>Constraint</b>", styles["TableCell"]),
+         Paragraph("<b>Implementation status</b>", styles["TableCell"])],
+        [Paragraph("Use only <b>GameAPI</b>", styles["TableCell"]),
+         Paragraph("Met: all runtime data is read via API methods in <code>Controller.__init__</code>", styles["TableCell"])],
+        [Paragraph("Emit legal engine actions only", styles["TableCell"]),
+         Paragraph("Met: action parsing + legality checks in <code>_parse_action</code> / <code>_is_action_legal</code>", styles["TableCell"])],
+        [Paragraph("Handle stochastic execution failures", styles["TableCell"]),
+         Paragraph("Met: expected-state tracking + retry path in <code>choose_next_action</code>", styles["TableCell"])],
+        [Paragraph("Maximize expected cumulative reward under horizon", styles["TableCell"]),
+         Paragraph("Met: combines A* route plans, reward-aware greedy fallback, and reset farming logic", styles["TableCell"])],
     ]
-    col_widths = [usable_width * 0.65, usable_width * 0.35]
-    req_table = Table(req_data, colWidths=col_widths, repeatRows=1)
-    req_table.setStyle(table_style())
-    story.append(req_table)
+    contract_table = Table(contract_data, colWidths=[usable_width * 0.35, usable_width * 0.65], repeatRows=1)
+    contract_table.setStyle(table_style())
+    story.append(contract_table)
     story.append(Spacer(1, 0.3 * cm))
 
-    # ------------------------------------------------------------------ #
-    # Section 2 — Overall approach
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("2. Overall approach", styles["H2"]))
+    story.append(Paragraph("2. Controller architecture", styles["H2"]))
     story.append(Paragraph(
-        "The implementation is a <b>greedy, priority-ranked reactive controller</b> (not a planner/MDP solver). "
-        "Each call picks the single best legal action by walking down a fixed priority ladder, with scores that "
-        "fold in <b>expected reward</b>, <b>action success probabilities</b>, and <b>distance</b>. "
-        "This is a pragmatic choice for a stochastic setting where full planning is expensive and outcomes are noisy.",
-        styles["Body"],
-    ))
-
-    # ------------------------------------------------------------------ #
-    # Section 3 — Initialization
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("3. Initialization &amp; precomputation (<code>__init__</code>)", styles["H2"]))
-    story.append(Paragraph(
-        "All static data is front-loaded via the API and cached so per-step decisions are cheap:",
+        "The final controller is a <b>hybrid</b>:",
         styles["Body"],
     ))
     story.append(ListFlowable([
         ListItem(Paragraph(
-            "Pulls <b>get_reachable</b>, <b>get_capacities</b>, <b>get_goal_reward</b>, plus lazy caches "
-            "for person goal/weight/reward-mean and the <b>stochastic probabilities</b> "
-            "(<i>_person_prob</i>, <i>_elev_prob</i>).",
+            "<b>Primary path:</b> build an Assignment-1-compatible problem from the current stochastic state and "
+            "run A* (<code>search.astar_search(problem, h=problem.h_astar)</code>) to produce a deterministic action plan.",
             styles["Body"]), leftIndent=15),
         ListItem(Paragraph(
-            "Builds an <b>elevator transfer graph</b>: <i>_shared_floors</i> (floors two elevators have in "
-            "common) and an adjacency list <i>_adj</i>, enabling multi-elevator handoffs when no single "
-            "elevator reaches a goal.",
+            "<b>Execution path:</b> track the expected next state after every emitted action; if an ENTER/EXIT "
+            "fails stochastically and state is unchanged, retry when safe.",
             styles["Body"]), leftIndent=15),
         ListItem(Paragraph(
-            "Precomputes <b>reset-farming economics</b>: <i>_compute_loop_rps</i> finds the best "
-            "reward-per-step single-person delivery loop, and a break-even threshold for when farming beats "
-            "full delivery.",
+            "<b>Fallback path:</b> if the plan is invalid/unavailable, apply greedy legal-action selection "
+            "with transfer-aware routing and probability-weighted priorities.",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "<b>Economic override:</b> when a high-value passenger loop dominates expected value, switch to "
+            "farm mode (deliver lucrative passenger then RESET).",
             styles["Body"]), leftIndent=15),
     ], bulletType="bullet", start=None))
 
-    # ------------------------------------------------------------------ #
-    # Section 4 — Decision ladder
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("4. The decision ladder (<code>choose_next_action</code>)", styles["H2"]))
+    story.append(Paragraph("3. Key data structures and precomputation", styles["H2"]))
     story.append(Paragraph(
-        "The action is chosen by the first rule that fires:",
+        "Initialization materializes all invariants from the API so step-time decision logic remains cheap:",
+        styles["Body"],
+    ))
+    story.append(ListFlowable([
+        ListItem(Paragraph(
+            "<code>_person_goal</code>, <code>_person_weight</code>, <code>_person_prob</code>, "
+            "<code>_person_reward_mean</code>, <code>_elev_prob</code>",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Canonical state representation for cache keys and robust state comparison (<code>_canonical_state</code>)",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Transfer graph and shared-floor map (<code>_adj</code>, <code>_shared_floors</code>) for multi-elevator routing",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Plan cache keyed by <code>(plan_mode, plan_pid, state)</code> to avoid repeated A* solves",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "RL-like layout detector (<code>_is_rl_like</code>) and precomputed farming signal "
+            "(<code>_farming_rps</code>, <code>_farming_pid</code>)",
+            styles["Body"]), leftIndent=15),
+    ], bulletType="bullet", start=None))
+
+    story.append(Paragraph("4. Per-step control flow", styles["H2"]))
+    story.append(Paragraph(
+        "Execution order inside <code>choose_next_action</code>:",
         styles["Body"],
     ))
 
-    ladder_data = [
-        [Paragraph("<b>Step</b>", styles["TableCell"]),
-         Paragraph("<b>Rule</b>", styles["TableCell"]),
-         Paragraph("<b>Description</b>", styles["TableCell"])],
-        [Paragraph("1", styles["TableCell"]),
-         Paragraph("<b>EXIT at goal</b>", styles["TableCell"]),
-         Paragraph("Drop a rider who is already on their goal floor (collect reward).", styles["TableCell"])],
-        [Paragraph("2", styles["TableCell"]),
-         Paragraph("<b>EXIT for transfer</b>", styles["TableCell"]),
-         Paragraph(
-             "If the current elevator can't reach a rider's goal, drop them on a shared floor toward a "
-             "routed next elevator.",
-             styles["TableCell"])],
-        [Paragraph("3", styles["TableCell"]),
-         Paragraph("<b>ENTER</b>", styles["TableCell"]),
-         Paragraph(
-             "Board a waiting person if capacity allows; scored by "
-             "<i>reward_mean × person_prob × elev_prob</i>, with a large bonus when the elevator can reach "
-             "the goal directly, and a filter to avoid boarding the wrong elevator on a transfer chain.",
-             styles["TableCell"])],
-        [Paragraph("4", styles["TableCell"]),
-         Paragraph("<b>MOVE loaded</b>", styles["TableCell"]),
-         Paragraph(
-             "Drive a loaded elevator toward the nearest goal (or transfer floor), scored by reward and distance.",
-             styles["TableCell"])],
-        [Paragraph("5", styles["TableCell"]),
-         Paragraph("<b>Reset-farm</b>", styles["TableCell"]),
-         Paragraph(
-             "<b>RESET</b> when looping a cheap high-reward delivery beats delivering low-value remainders.",
-             styles["TableCell"])],
-        [Paragraph("6", styles["TableCell"]),
-         Paragraph("<b>MOVE empty</b>", styles["TableCell"]),
-         Paragraph(
-             "Send an empty elevator toward the most valuable reachable waiting person.",
-             styles["TableCell"])],
-        [Paragraph("7", styles["TableCell"]),
-         Paragraph("<b>RESET</b>", styles["TableCell"]),
-         Paragraph("Fallback.", styles["TableCell"])],
+    flow_data = [
+        [Paragraph("<b>Phase</b>", styles["TableCell"]),
+         Paragraph("<b>Logic</b>", styles["TableCell"])],
+        [Paragraph("A. Farm override", styles["TableCell"]),
+         Paragraph("If <code>_simple_farming_active(state)</code> is true, emit farm action sequence first.", styles["TableCell"])],
+        [Paragraph("B. Reconcile last action", styles["TableCell"]),
+         Paragraph("Consume plan head on success; retry recoverable ENTER/EXIT failures; otherwise invalidate active plan.", styles["TableCell"])],
+        [Paragraph("C. Build/refresh plan", styles["TableCell"]),
+         Paragraph("Choose strategy and compute plan with A* (<code>_build_strategy_plan</code> / <code>_plan_actions</code>).", styles["TableCell"])],
+        [Paragraph("D. Validate candidate", styles["TableCell"]),
+         Paragraph("Only emit if legal in current state, otherwise clear plan and fallback.", styles["TableCell"])],
+        [Paragraph("E. Greedy fallback", styles["TableCell"]),
+         Paragraph("Use <code>_greedy_action</code> with routing + reward/probability scoring; final guard emits RESET.", styles["TableCell"])],
     ]
-    col_widths_ladder = [usable_width * 0.07, usable_width * 0.22, usable_width * 0.71]
-    ladder_table = Table(ladder_data, colWidths=col_widths_ladder, repeatRows=1)
-    ladder_table.setStyle(table_style())
-    story.append(ladder_table)
+    flow_table = Table(flow_data, colWidths=[usable_width * 0.28, usable_width * 0.72], repeatRows=1)
+    flow_table.setStyle(table_style())
+    story.append(flow_table)
     story.append(Spacer(1, 0.3 * cm))
 
-    # ------------------------------------------------------------------ #
-    # Section 5 — Harder demands
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("5. How it meets the harder demands", styles["H2"]))
-    story.append(ListFlowable([
-        ListItem(Paragraph(
-            "<b>Stochasticity:</b> success probabilities are multiplied into every ENTER/MOVE score, so "
-            "unreliable (\"broken\") elevators on hard tiers are deprioritized when a reliable alternative "
-            "exists; loop step-counts are inflated by <i>1/elev_prob</i>.",
-            styles["Body"]), leftIndent=15),
-        ListItem(Paragraph(
-            "<b>Multi-elevator layouts (e.g., <i>_m3</i>):</b> the BFS router (<i>_route_next_elevator</i>) "
-            "+ <i>_best_transfer_floor</i> enable passenger handoffs across elevators with disjoint "
-            "reachable sets.",
-            styles["Body"]), leftIndent=15),
-        ListItem(Paragraph(
-            "<b>Reset-farming layouts (<i>_rl</i>):</b> dynamic comparison of "
-            "<i>farming_rps × steps_remaining</i> vs. current full-delivery value lets it switch into "
-            "\"farm one lucrative person + RESET\" mode — exactly what the <i>rl</i> problems reward.",
-            styles["Body"]), leftIndent=15),
-    ], bulletType="bullet", start=None))
-
-    # ------------------------------------------------------------------ #
-    # Section 6 — Compliance notes
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("6. Compliance notes", styles["H2"]))
-    story.append(ListFlowable([
-        ListItem(Paragraph(
-            "✅ Goes exclusively through <b>GameAPI</b> (<i>self.game.*</i>) — respects the engine-access policy.",
-            styles["Body"]), leftIndent=15),
-        ListItem(Paragraph(
-            "✅ Emits only the four legal action formats.",
-            styles["Body"]), leftIndent=15),
-        ListItem(Paragraph(
-            "✅ <b>id = [\"322535436\"]</b> is set.",
-            styles["Body"]), leftIndent=15),
-        ListItem(Paragraph(
-            "The repo also carries the Assignment 1 solution "
-            "(<i>ex1_322535436.py</i>, <i>search.py</i>, <i>utils.py</i>), which the controller doesn't "
-            "import at runtime — the A2 controller is self-contained and greedy rather than reusing the "
-            "A1 A* search.",
-            styles["Body"]), leftIndent=15),
-    ], bulletType="bullet", start=None))
-
-    # ------------------------------------------------------------------ #
-    # Section 7 — One thing worth checking
-    # ------------------------------------------------------------------ #
-    story.append(Paragraph("7. One thing worth checking", styles["H2"]))
+    story.append(Paragraph("5. Focused tuning for e4_hard + rl_*", styles["H2"]))
     story.append(Paragraph(
-        "The deterministic optimum from A1 is referenced by the grader as <i>optimal_a1</i> to scale "
-        "horizons, but the A2 controller doesn't use the A1 planner. That's a valid design, but a hybrid "
-        "(short-horizon planning for the transfer chains, greedy elsewhere) is the natural next step to push "
-        "scores on the harder <i>sol2</i>-dominated layouts shown in <i>baseline/summary.md</i>.",
+        "The latest iteration added three targeted changes:",
         styles["Body"],
     ))
+    story.append(ListFlowable([
+        ListItem(Paragraph(
+            "<b>Anchor-elevator planning restriction:</b> when one reliable elevator (prob ≥ 0.9) can serve all "
+            "active persons, A* planning uses only that elevator (<code>_planning_elevators</code>). "
+            "This suppresses costly plans that depend on broken elevators in hard layouts.",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "<b>RL-mode farm activation adjustment:</b> for RL-like reward distributions, keep farm mode active "
+            "through the horizon whenever steps remain, preserving repeat delivery+reset loops.",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "<b>Reliability-weighted MOVE fallback:</b> greedy MOVE scoring now multiplies by "
+            "<code>_elev_prob[eid]</code>, biasing movement decisions toward dependable elevators.",
+            styles["Body"]), leftIndent=15),
+    ], bulletType="bullet", start=None))
+
+    story.append(Paragraph("6. Targeted benchmark impact (30 seeds)", styles["H2"]))
+    impact_data = [
+        [Paragraph("<b>Layout</b>", styles["TableCell"]),
+         Paragraph("<b>Before</b>", styles["TableCell"]),
+         Paragraph("<b>After</b>", styles["TableCell"]),
+         Paragraph("<b>Delta</b>", styles["TableCell"])],
+        [Paragraph("e4_hard", styles["TableCell"]), Paragraph("86.733", styles["TableCell"]), Paragraph("136.533", styles["TableCell"]), Paragraph("+49.800", styles["TableCell"])],
+        [Paragraph("rl_easy", styles["TableCell"]), Paragraph("444.167", styles["TableCell"]), Paragraph("471.667", styles["TableCell"]), Paragraph("+27.500", styles["TableCell"])],
+        [Paragraph("rl_med", styles["TableCell"]), Paragraph("424.200", styles["TableCell"]), Paragraph("458.333", styles["TableCell"]), Paragraph("+34.133", styles["TableCell"])],
+        [Paragraph("rl_hard", styles["TableCell"]), Paragraph("424.233", styles["TableCell"]), Paragraph("458.333", styles["TableCell"]), Paragraph("+34.100", styles["TableCell"])],
+    ]
+    impact_table = Table(
+        impact_data,
+        colWidths=[usable_width * 0.28, usable_width * 0.22, usable_width * 0.22, usable_width * 0.28],
+        repeatRows=1,
+    )
+    impact_table.setStyle(table_style())
+    story.append(impact_table)
+
+    story.append(Paragraph("7. Validation and reproducibility", styles["H2"]))
+    story.append(ListFlowable([
+        ListItem(Paragraph(
+            "Install dependencies: <code>pip install numpy reportlab</code>",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Run grader benchmark: <code>python ex2_check.py</code>",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Regenerate this PDF: <code>python docs/generate_summary_pdf.py</code>",
+            styles["Body"]), leftIndent=15),
+        ListItem(Paragraph(
+            "Security checks used during iteration: secret scan on changed files and CodeQL (0 alerts).",
+            styles["Body"]), leftIndent=15),
+    ], bulletType="bullet", start=None))
 
     return story
 
