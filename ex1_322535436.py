@@ -140,7 +140,7 @@ class ElevatorsProblem(search.Problem):
                 if value == self.person_goals[person_idx]:
                     continue
                 for elevator_idx in self.person_useful_elevators[person_idx]:
-                    if value in self.elevator_reachable_sets[elevator_idx]:
+                    if value in self.elevator_pickup_sets[elevator_idx]:
                         move_targets[elevator_idx].add(value)
             else:
                 elevator_idx = value
