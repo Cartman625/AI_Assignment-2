@@ -206,6 +206,33 @@ class Controller:
         return state == self._last_state
 
     # ------------------------------- Planning ------------------------------- #
+    def _planning_elevators(self, state, person_ids):
+        if len(self._elevators) <= 1:
+            return self._elevators
+
+        elevators_t, persons_t, _ = state
+        elev_floor = {eid: f for eid, f, _ in elevators_t}
+        persons_by_id = {pid: loc for pid, loc in persons_t}
+
+        ranked = sorted(self._elevators, key=lambda eid: self._elev_prob.get(eid, 1.0), reverse=True)
+        anchor = ranked[0] if ranked else None
+        if anchor is None or self._elev_prob.get(anchor, 1.0) < 0.9:
+            return self._elevators
+
+        anchor_reach = self.reachable[anchor]
+        anchor_cap = self.capacities[anchor]
+        for pid in person_ids:
+            loc = persons_by_id[pid]
+            goal = self._person_goal[pid]
+            if goal not in anchor_reach or self._person_weight[pid] > anchor_cap:
+                return self._elevators
+            if loc[0] == "floor":
+                if loc[1] not in anchor_reach:
+                    return self._elevators
+            elif loc[1] != anchor:
+                return self._elevators
+        return (anchor,)
+
     def _build_problem(self, state, plan_mode, plan_pid):
         elevators_t, persons_t, _ = state
         if plan_mode == "farm":
@@ -218,10 +245,11 @@ class Controller:
 
         elev_floor = {eid: f for eid, f, _ in elevators_t}
         persons_by_id = {pid: loc for pid, loc in persons_t}
+        plan_elevators = self._planning_elevators(state, person_ids)
 
         elevators_def = {
             eid: (elev_floor[eid], tuple(sorted(self.reachable[eid])), self.capacities[eid])
-            for eid in self._elevators
+            for eid in plan_elevators
         }
         persons_def = {}
         for pid in sorted(person_ids):
@@ -348,11 +376,11 @@ class Controller:
     def _simple_farming_active(self, state):
         if self._farming_pid is None or self._farming_rps <= 0.0 or not state[1]:
             return False
-        if not self._is_rl_like:
-            return False
         if self._person_reward_mean.get(self._farming_pid, 0.0) < 40.0:
             return False
         steps_left = self.game.get_max_steps() - self.game.get_current_steps()
+        if self._is_rl_like:
+            return steps_left >= 2
         current_value = self._state_delivery_value(state)
         return self._farming_rps * steps_left > current_value * 1.5
 
@@ -504,7 +532,7 @@ class Controller:
             for pid in pids:
                 goal = self._person_goal[pid]
                 if goal in self.reachable[eid] and goal != ef:
-                    score = self._person_reward_mean[pid] / (1 + abs(goal - ef))
+                    score = (self._person_reward_mean[pid] * self._elev_prob[eid]) / (1 + abs(goal - ef))
                     if score > best_score:
                         best_score = score
                         best_move = f"MOVE{{{eid},{goal}}}"
@@ -517,7 +545,7 @@ class Controller:
                         continue
                     target = min(shared, key=lambda f: abs(f - ef))
                     if target != ef:
-                        score = self._person_reward_mean[pid] / (1 + abs(target - ef))
+                        score = (self._person_reward_mean[pid] * self._elev_prob[eid]) / (1 + abs(target - ef))
                         if score > best_score:
                             best_score = score
                             best_move = f"MOVE{{{eid},{target}}}"
